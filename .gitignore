@@ -1,0 +1,49 @@
+#Personal
+notREADME.md
+requirements.txt
+ai-agent-learning/
+langchain-learning/
+ml-learning/
+python-for-ai-learning/
+sendkonalang-app/
+web-scraper/
+file-organizer/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project specific
+output/
+*.pdf
+*.csv
+.DS_Store
