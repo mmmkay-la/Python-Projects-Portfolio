@@ -6,8 +6,8 @@ langchain-learning/
 ml-learning/
 python-for-ai-learning/
 sendkonalang-app/
-web-scraper/
 file-organizer/
+*.duckdb
 
 # Python
 __pycache__/
