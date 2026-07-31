@@ -9,13 +9,10 @@ Goal: Generate a Dashboard Report showing the latest bills
 
 import requests
 import asyncio
-import httpx
+import aiohttp
 import duckdb
 import pandas as pd
 import time
-
-db_lock = asyncio.Lock()
-rows = []
 
 def init_dw_connection() -> duckdb.DuckDBPyConnection:
     db_conn = duckdb.connect(database='senate_analysis_dw.duckdb')
@@ -27,7 +24,7 @@ def init_dw_connection() -> duckdb.DuckDBPyConnection:
     dim_congress_sql = '''
         CREATE OR REPLACE TABLE dim_congress (
             congress_id VARCHAR PRIMARY KEY,
-            cong_num VARCHAR,
+            cong_num VARCHAR UNIQUE,
             cong_name VARCHAR, 
             cong_ordinal VARCHAR,
             start_date DATE,
@@ -37,7 +34,6 @@ def init_dw_connection() -> duckdb.DuckDBPyConnection:
             year_range VARCHAR
         );
     '''
-    
 
     dim_author = '''
         CREATE OR REPLACE TABLE dim_author (
@@ -60,6 +56,7 @@ def init_dw_connection() -> duckdb.DuckDBPyConnection:
             long_title VARCHAR,
             date_filled DATE,
             scope VARCHAR,
+            authors VARCHAR []
             FOREIGN KEY (congress_id) REFERENCES dim_congress(congress_id)
         );
     '''
@@ -80,12 +77,6 @@ def init_dw_connection() -> duckdb.DuckDBPyConnection:
     db_conn.execute(bridge_sql)
 
     print('Data Warehouse Initialized')
-
-def insert_dw_tables(db_conn:duckdb.DuckDBPyConnection, tbl_name: str):
-    db_conn.execute(
-        'INSERT INTO query_table($1) COLUMNS(?)',
-        [tbl_name, 1]
-    )
 
 def load_congress(url: str) -> dict:
 
@@ -127,74 +118,106 @@ def load_congress(url: str) -> dict:
                 print(f'Request failed: {response.status_code}')
                 print(f"An unexpected {type(e).__name__} occurred: {e}")
 
-async def load_documents(url, client, offset):
-    global rows
+async def load_documents(url, client, offset, sem):
+    max_attempts = 5
+    wait_delay = 2
+
     query_param = {
         'limit':'100',
         'offset': offset
     }
+    async with sem:
+        for attempt in range(max_attempts):
+            try:
+                response = await client.get(url+'/api/documents', params=query_param)
+                if response.status == 200:
+                    res_json  = await response.json()
+                    result = [ 
+                    [   row['id'], 
+                        row['name'],
+                        row['type'],
+                        row['congress'],
+                        row['title'],
+                        row['long_title'],
+                        row['date_filed'],
+                        row['scope'],
+                        row['authors']
+                    ] for row in res_json['data'] ]
+                    return result
 
-    try:
-        response = await client.get(url+'/api/documents', params=query_param)
-        if response.status_code == 200:
-            res_json  = response.json()
-            
-            for row in res_json['data']:
-                print(row)
-                insert_doc = []
-                insert_doc.append(row['id'])
-                insert_doc.append(row['name'])
-                insert_doc.append(row['type'])
-                with duckdb.connect(database='senate_analysis_dw.duckdb') as db_conn:
-                    cong_id = db_conn.execute('SELECT congress_id FROM dim_congress WHERE cong_num = ?',[row['congress']]).fetchone()
-                insert_doc.append(str(cong_id[0]))
-                insert_doc.append(row['title'])
-                insert_doc.append(row['long_title'])
-                insert_doc.append(row['date_filed'])
-                insert_doc.append(row['scope'])
-                rows.append(insert_doc)
+                elif response.status == 500:
+                    wait_time = wait_delay * (2 ** attempt)
+                    print(f'Server Error 500. Retrying attempt {attempt + 1}/{max_attempts} in {wait_time}s...')
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    print(f'ERROR: {response.status}: {await response.text()}, offset: {offset}')
+                    return []
+                
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                wait_time = wait_delay * (2 ** attempt)
+                print(f" Network error {type(e).__name__} at offset {offset}. "
+                      f"Retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                continue
 
-            if len(rows) >= 10000:
-                async with db_lock:
-                    with duckdb.connect(database='senate_analysis_dw.duckdb') as db_conn:
-                        columns = db_conn.sql('SELECT * FROM fact_congress_bill').columns
+            except Exception as e:
+                print(f'ERRROR {type(e).__name__}: {e}')
+                return []
 
-                    df = pd.DataFrame(data=rows, columns=columns)
-                    db_conn.execute('INSERT OR IGNORE INTO fact_congress_bill SELECT * FROM df')
-                    print(f'Successfully Added: {len(rows)} rows into fact_congress_bill records...')
-                    rows.clear()
-
-    except Exception as e:
-        print(f'ERRROR {type(e).__name__}: {e}')
+        print(f'ALL ATEMPTS FAILED AT offset: {offset}')
+        return []
 
 async def main_load_docs():
-    global rows
+
+    buffer_threshold = 15000
+    total_count = 0
+
     url = 'https://open-congress-api.bettergov.ph'
 
-    with requests.Session() as sesh:
-        response = sesh.get(url+'/api/documents', params={'limit':'100'})
-        if response.status_code == 200:
-            total_rows = response.json()['pagination']['total']
-            limit = response.json()['pagination']['limit']
+    sem = asyncio.Semaphore(5)
+    try:
+        with duckdb.connect(database='senate_analysis_dw.duckdb') as db_conn:
+            columns = db_conn.sql('SELECT * FROM fact_congress_bill').columns
+            db_conn.execute("SET GLOBAL pandas_analyze_sample=100000")
 
-            async with httpx.AsyncClient() as client:
-                tasks = [load_documents(url, client, offset) for offset in range(0, total_rows, limit)]
-                await asyncio.gather(*tasks)
+            async with aiohttp.ClientSession() as client:
+                async with client.get(url+'/api/documents', params={'limit':'100'}) as response:
+                    if response.status != 200:
+                        print('ERROR!')
+                        return 0
+                    
+                    res = await response.json()
+                    total_rows = res['pagination']['total']
+                    limit = res['pagination']['limit']
+                    index_start = 0 
+                    load_rows = 0
 
-    if rows:
-        async with db_lock:
-            with duckdb.connect(database='senate_analysis_dw.duckdb') as db_conn:
-                columns = db_conn.sql('SELECT * FROM fact_congress_bill').columns
-                df = pd.DataFrame(data=rows, columns=columns)
-                db_conn.execute('INSERT OR IGNORE INTO fact_congress_bill SELECT * FROM df')
-            print(f'Successfully Added: {len(rows)} rows into fact_congress_bill records...')
-    return total_rows
-    
+                    while index_start < total_rows:
+                        load_rows = min(index_start+buffer_threshold, total_rows)
+
+                        start_time = time.time()
+                        tasks = [load_documents(url, client, offset, sem) for offset in range(index_start, load_rows, limit)]
+                        results = await asyncio.gather(*tasks)
+
+                        index_start = load_rows # set for next iteration
+                        rows = [row for result in results for row in result]
+                        
+                        if len(rows) > 0:
+                            df = pd.DataFrame(data=rows, columns=columns,)
+                            db_conn.execute('INSERT OR IGNORE INTO fact_congress_bill SELECT * FROM df')
+                            print(f'Successfully Added: {len(rows)} rows into fact_congress_bill records... ({time.time()-start_time:.2f} secs)')
+                            total_count += len(rows)
+                            rows.clear()
+
+                        await asyncio.sleep(5) 
+                    return total_count
+    except Exception as e:
+        print(f'ERROR at main. {type(e).__name__}: {e}')
+        return total_count
+        
 
 if __name__ == '__main__':
-    latest_cong = {}
-    cong_docs = {}
-
     # init_dw_connection() 
 
     url = 'https://open-congress-api.bettergov.ph'
@@ -203,10 +226,6 @@ if __name__ == '__main__':
 
     print("Starting optimized data ingestion pipeline...\n")
     start_time = time.time()
-
     total_rows = asyncio.run(main_load_docs())
-
-    end_time = time.time()
-
-    print(f"\nFinished! Ingested {total_rows} rows in {end_time - start_time:.2f} seconds.\n")
+    print(f"\nFinished! Ingested {total_rows} rows in {time.time() - start_time:.2f} seconds.\n")
 
