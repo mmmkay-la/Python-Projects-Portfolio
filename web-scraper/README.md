@@ -1,0 +1,2 @@
+# Senate Score Card
+A Python script that builds a DuckDB data warehouse by retrieving Philippine Senate data through API calls and storing it in structured tables. It also provides an option to generate a report showing bills authored by current senators to help track legislative activity and progress.

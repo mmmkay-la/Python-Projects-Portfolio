@@ -4,7 +4,14 @@
 Philippine Senate API:
 https://open-congress-api.bettergov.ph/api/scalar#description/introduction
 
-Goal: Generate a Dashboard/Report showing the bills created by current senators
+Goals:
+(1) Retrieve data via API call and store them in dukdb data warehouse.
+(2) Generate a Report showing the bills created by current senators
+to determine their work progress.
+
+Program Description:
+This Python script builds a DuckDB data warehouse by retrieving Philippine Senate data through API calls and storing it in structured tables. It also provides an option to generate a report showing bills authored by current senators to help track legislative activity and progress.
+
 """
 import requests
 import asyncio
